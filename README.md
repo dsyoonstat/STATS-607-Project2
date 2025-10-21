@@ -1,4 +1,4 @@
-# Simulational Studies for the Adaptive Reference-Guided Estimator
+# Simulation Studies for the Adaptive Reference-Guided Estimator
 
 Umich STATS 607 Unit 2 Project, Fall 2025
 
