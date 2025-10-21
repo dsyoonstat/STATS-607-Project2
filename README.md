@@ -1,4 +1,4 @@
-# Simulational Studies of the Adaptive Reference-Guided Estimator for Principal Component Subspace under High-Dimensional Low-Sample-Size Data
+# Simulational Studies for the Adaptive Reference-Guided Estimator
 
 Umich STATS 607 Unit 2 Project, Fall 2025
 
