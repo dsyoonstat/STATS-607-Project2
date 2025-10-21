@@ -1,7 +1,7 @@
-# src/plot.py
-# Publication-quality plotting: tables (CSV) -> plots (PDF/SVG)
-# - Single: trend over a^2 (no std shading)
-# - Multi: combined ARG/PCA × θ1/θ2, log-x with fixed ticks, no minor ticks
+# plot.py
+# - Single-spike, single-reference case: trend over a^2
+# - Multi-spike, multi-reference case: ARG/PCA × θ1/θ2
+# - Convergence: normalized p^α |u1ᵀ d1| curves
 
 from pathlib import Path
 import re
@@ -39,13 +39,13 @@ def _ensure_dirs():
     """Ensure expected folders exist."""
     base = Path("results")
     (base / "tables").mkdir(exist_ok=True, parents=True)
-    (base / "plots").mkdir(exist_ok=True, parents=True)
+    (base / "figures").mkdir(exist_ok=True, parents=True)
 
 
 def _save(fig: mpl.figure.Figure, stem: str):
-    """Save figure as PDF and SVG into results/plots."""
-    out_pdf = Path("results/plots") / f"{stem}.pdf"
-    out_svg = Path("results/plots") / f"{stem}.svg"
+    """Save figure as PDF and SVG into results/figures."""
+    out_pdf = Path("results/figures") / f"{stem}.pdf"
+    out_svg = Path("results/figures") / f"{stem}.svg"
     fig.savefig(out_pdf)
     fig.savefig(out_svg)
     print(f"Saved: {out_pdf}\n       {out_svg}")
@@ -80,7 +80,7 @@ def make_single_plots(dist: str):
       results/tables/single_{dist}_mean.csv
       results/tables/single_{dist}_std.csv   (read but not used in the current figure)
     Output:
-      results/plots/single_{dist}_trend.(pdf|svg)
+      results/figures/single_{dist}_trend.(pdf|svg)
     """
     from matplotlib.lines import Line2D
 
@@ -139,7 +139,7 @@ def make_multi_plots(dist: str):
       results/tables/multi_{dist}_mean.csv
       results/tables/multi_{dist}_std.csv
     Output:
-      results/plots/multi_{dist}_angles.(pdf|svg)
+      results/figures/multi_{dist}_angles.(pdf|svg)
     Spec:
       - One figure combining θ1/θ2 across methods:
           * colors: θ1 = first, θ2 = second
@@ -173,7 +173,6 @@ def make_multi_plots(dist: str):
 
     fig, ax = plt.subplots(figsize=(6.8, 4.0))
 
-    # --- Plot configuration ---
     # θ1: solid for ARG, dashed for PCA
     ax.plot(p_vals, y_ARG1, color=c_th1, linestyle="-",  marker="o", linewidth=1.9, label=r"$\theta_1$ (ARG)")
     ax.plot(p_vals, y_PCA1, color=c_th1, linestyle="--", marker="o", linewidth=1.9, label=r"$\theta_1$ (PCA)")
@@ -189,7 +188,6 @@ def make_multi_plots(dist: str):
     ax.xaxis.set_minor_locator(NullLocator())
     ax.minorticks_off()
 
-    # Grid and labels
     ax.grid(axis="y", which="major", linestyle="--", linewidth=0.5, alpha=0.3)
     ax.grid(axis="x", which="both", visible=False)
 
@@ -198,7 +196,7 @@ def make_multi_plots(dist: str):
     ax.set_title(f"Two-spike, two-reference ({dist}) — θ₁ / θ₂ across methods")
     ax.set_ylim(bottom=0)
 
-    # Custom legend: group by θ1, θ2 (color) and show both linestyles
+    # Custom legend grouped by theta and method
     handles = [
         Line2D([], [], color=c_th1, linestyle="-",  marker="o", linewidth=2.2, label=r"$\theta_1$ ARG"),
         Line2D([], [], color=c_th1, linestyle="--", marker="o", linewidth=2.2, label=r"$\theta_1$ PCA"),
@@ -217,6 +215,93 @@ def make_multi_plots(dist: str):
     plt.close(fig)
 
 
+# ---------------------- convergence (Theorem 4) ----------------------
+def make_convergence_plots():
+    """
+    Inputs:
+      results/tables/convergence_rate_snr*.csv
+        - rows: p in {100, 200, 500, 1000, 2000}
+        - cols: alpha={value} (normalized by p=100)
+
+    Output:
+      results/figures/convergence_rate_all.pdf / .svg
+
+    Spec:
+      - One figure with multiple subplots (2×3 grid)
+      - Each subplot: one SNR value, showing normalized curves over p
+      - Log x-axis with ticks [100, 200, 500, 1000, 2000]; no minor ticks.
+      - 'o' markers; one color per alpha.
+    """
+    from matplotlib.ticker import FixedLocator, ScalarFormatter, NullLocator
+    import glob
+    import re
+
+    tables_dir = Path("results/tables")
+    plot_dir   = Path("results/figures")
+    plot_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = sorted(glob.glob(str(tables_dir / "convergence_rate_snr*.csv")))
+    if not paths:
+        raise FileNotFoundError(f"No convergence_rate_snr*.csv found in {tables_dir}")
+
+    snr_re = re.compile(r"convergence_rate_snr([0-9\.eE+-]+)\.csv$")
+    p_ticks = [100, 200, 500, 1000, 2000]
+
+    # --- figure layout: 2×3 grid (adjust if different number of SNRs) ---
+    n_files = len(paths)
+    n_rows, n_cols = 2, 3
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 7))
+    axes = axes.flatten()
+
+    for i, path in enumerate(paths):
+        if i >= len(axes):
+            break  # in case more than 6 SNRs
+        ax = axes[i]
+
+        m = snr_re.search(path)
+        snr_tag = m.group(1) if m else "?"
+
+        df_norm = pd.read_csv(path, index_col=0)
+        p_vals = df_norm.index.astype(int).to_numpy()
+
+        # Plot each α curve
+        for col in df_norm.columns:
+            y = df_norm[col].to_numpy(float)
+            ax.plot(p_vals, y, marker="o", markersize = 4, linewidth=1.2, label=col.replace("alpha=", r"$\alpha$="))
+
+        # Log x-axis
+        ax.set_xscale("log", base=10)
+        ax.xaxis.set_major_locator(FixedLocator(p_ticks))
+        ax.xaxis.set_major_formatter(ScalarFormatter())
+        ax.xaxis.set_minor_locator(NullLocator())
+        ax.minorticks_off()
+
+        # Style
+        ax.set_xlim(min(p_ticks), max(p_ticks))
+        ax.set_ylim(bottom=0)
+        ax.set_title(f"SNR = {snr_tag}")
+        ax.grid(axis="y", which="major", linestyle="--", linewidth=0.5, alpha=0.3)
+        ax.grid(axis="x", which="both", visible=False)
+
+        if i // n_cols == n_rows - 1:
+            ax.set_xlabel(r"Dimension $p$ (log scale)")
+        if i % n_cols == 0:
+            ax.set_ylabel(r"Normalized $p^{\alpha}|u_1^\top d_1|$")
+
+    # Remove unused subplots (if any)
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    # Shared legend below all subplots
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="lower center", ncol=10, frameon=False, fontsize=9)
+    fig.suptitle(r"Convergence-rate behavior across SNR values", fontsize=13)
+    fig.tight_layout(rect=[0, 0.05, 1, 0.97])
+
+    _save(fig, "convergence_rate")
+    plt.close(fig)
+
+
 # ---------------------- main ----------------------
 def main():
     _ensure_dirs()
@@ -230,8 +315,8 @@ def main():
     for dist in ("normal", "t"):
         make_multi_plots(dist)
 
-    print("✅ All plots saved to results/plots (PDF & SVG)")
-
+    # Convergence (Theorem 4)
+    make_convergence_plots()
 
 if __name__ == "__main__":
     main()

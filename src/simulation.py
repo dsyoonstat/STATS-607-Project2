@@ -1,11 +1,18 @@
-from typing import List, Tuple, Dict, Any
-import json
+# simulation.py
+# - Single-spike, single-reference (Normal + t)
+# - Multi-spike, multi-reference (Normal + t)
+# - Convergence-rate study for Theorem 4 (Normal)
+#
+# Outputs:
+#   results/tables/*.csv (summary tables)
+
+from typing import List, Tuple
 from pathlib import Path
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-# === import from the files ===
+# === import from files ===
 from dgps import (
     generate_basis,
     generate_reference_vectors,
@@ -17,6 +24,7 @@ from dgps import (
 from methods import (
     compute_PC_subspace,
     compute_ARG_PC_subspace,
+    compute_negative_ridge_discriminants,
 )
 from metrics import compute_principal_angles
 
@@ -34,28 +42,65 @@ def run_simulation_single(
     master_seed: int = 725,
 ) -> None:
     """
-    Single-spike, single-reference simulation with both Normal and t sampling.
-    Saves raw trial arrays (NPZ) to results/raw and summary CSVs (mean/std) to results/tables.
+    Run the single-spike / single-reference simulation under Normal and t sampling
+    and write summary tables (means, stds of principal angles) to disk.
+
+    Parameters
+    ----------
+    p_list : List[int]
+        List of ambient dimensions p to sweep over (e.g., [100, 200, 500, ...]).
+    a_list : List[float]
+        Reference-vector alignment coefficients a ∈ [0,1]. For each a, the reference
+        is constructed as v = a·e1 + sqrt(1-a^2)·e2 using the basis from
+        `generate_basis`. Columns in the output are labeled as "a^2={value}".
+    n : int
+        Sample size per trial.
+    nu : int
+        Degrees of freedom for Student-t sampling (used only for the t runs).
+    n_trials : int
+        Number of Monte Carlo trials per (p, distribution) setting.
+    sigma_coef : Tuple[float, float]
+        Covariance parameters (c1, c2) for the single-spike model:
+        Σ = c1·p·e1e1ᵀ + c2·I_p. The true spike direction is u1 = e1.
+    master_seed : int, default=725
+        Master seed for reproducibility. A NumPy RNG is initialized with this seed,
+        and per-trial seeds are drawn from it for Normal and t runs.
+
+    Procedure
+    ---------
+    For each p in `p_list`:
+      1) Draw `n_trials` datasets from N(0, Σ) and t_ν(0, Σ).
+      2) For each dataset:
+         - Baseline: compute top-1 PCA subspace and its principal angle to u1.
+         - ARG: for each a in `a_list`, construct one reference vector v and compute
+           the top-1 ARG subspace; record the principal angle to u1.
+      3) Aggregate over trials to obtain mean and std for each column
+         [baseline, a^2=...].
+
+    Outputs (files)
+    ---------------
+    Writes four CSV tables to `results/tables/` (index = p values, columns as below):
+      - single_normal_mean.csv  : mean principal angles (radians) for Normal runs
+      - single_normal_std.csv   : std  of principal angles for Normal runs
+      - single_t_mean.csv       : mean principal angles (radians) for t runs
+      - single_t_std.csv        : std  of principal angles for t runs
+
+    Columns
+    -------
+    "baseline"    : top-1 PCA vs u1
+    "a^2={value}" : top-1 ARG vs u1 for each a in `a_list` (value is a², formatted)
+
+    Returns
+    -------
+    None
+        Results are saved to disk; nothing is returned.
     """
     # --- paths ---
     base_dir = Path("results")
-    raw_dir = base_dir / "raw"
     tables_dir = base_dir / "tables"
-    raw_dir.mkdir(exist_ok=True, parents=True)
     tables_dir.mkdir(exist_ok=True, parents=True)
 
-    # --- config dict (for reproducibility) ---
-    config: Dict[str, Any] = {
-        "p_list": p_list,
-        "a_list": a_list,
-        "n": n,
-        "nu": nu,
-        "n_trials": n_trials,
-        "sigma_coef": list(sigma_coef),
-        "master_seed": master_seed,
-    }
-
-    # Column labels
+    # Column labels (baseline + a^2 columns)
     col_labels = ["baseline"] + [f"a^2={a**2:.2g}" for a in a_list]
 
     mean_normal = np.zeros((len(p_list), len(col_labels)))
@@ -66,6 +111,7 @@ def run_simulation_single(
     master_rng = np.random.default_rng(master_seed)
 
     for pi, p in enumerate(tqdm(p_list, desc="single: p sweep", leave=False)):
+        # Σ = c1 * p * e1 e1^T + c2 I_p, u1 = e1
         Sigma, u1 = sigma_single_spike(p=p, coef=sigma_coef)
         if u1.ndim == 1:
             u1 = u1[:, None]  # (p,1)
@@ -74,19 +120,19 @@ def run_simulation_single(
         mu = np.zeros(p)
 
         normal_trials, t_trials = [], []
-        # build trials
+        # Build trials
         for _ in tqdm(range(n_trials), desc=f"single: build trials (p={p})", leave=False):
             seed_n = int(master_rng.integers(0, 2**31 - 1))
             seed_t = int(master_rng.integers(0, 2**31 - 1))
             normal_trials.append(sample_normal(Sigma=Sigma, n=n, mu=mu, seed=seed_n))
             t_trials.append(sample_t(Sigma=Sigma, nu=nu, n=n, mu=mu, seed=seed_t))
 
+        # Baseline (PCA top-1)
         baseline_normal_angles = np.zeros(n_trials)
         baseline_t_angles      = np.zeros(n_trials)
         arg_normal_all = np.zeros((len(a_list), n_trials))
         arg_t_all      = np.zeros((len(a_list), n_trials))
 
-        # baseline
         for i in tqdm(range(n_trials), desc=f"single: baseline eval (p={p})", leave=False):
             U_pc = compute_PC_subspace(samples=normal_trials[i], spike_number=1)
             baseline_normal_angles[i] = compute_principal_angles(u1, U_pc)[0]
@@ -104,9 +150,14 @@ def run_simulation_single(
             V = generate_reference_vectors(E, A)  # (p,1)
 
             for i in range(n_trials):
-                U_ARG = compute_ARG_PC_subspace(normal_trials[i], V, spike_number=1, orthonormal=True)
+                U_ARG = compute_ARG_PC_subspace(
+                    samples=normal_trials[i], reference_vectors=V, spike_number=1, orthonormal=True
+                )
                 arg_normal_all[aj, i] = compute_principal_angles(u1, U_ARG)[0]
-                U_ARG_t = compute_ARG_PC_subspace(t_trials[i], V, spike_number=1, orthonormal=True)
+
+                U_ARG_t = compute_ARG_PC_subspace(
+                    samples=t_trials[i], reference_vectors=V, spike_number=1, orthonormal=True
+                )
                 arg_t_all[aj, i] = compute_principal_angles(u1, U_ARG_t)[0]
 
             mean_normal[pi, 1+aj] = arg_normal_all[aj].mean()
@@ -114,25 +165,14 @@ def run_simulation_single(
             std_normal[pi, 1+aj]  = arg_normal_all[aj].std(ddof=0)
             std_t[pi, 1+aj]       = arg_t_all[aj].std(ddof=0)
 
-        # raw save per p
-        raw_normal = np.vstack([baseline_normal_angles[None, :], arg_normal_all])
-        raw_t      = np.vstack([baseline_t_angles[None, :],      arg_t_all])
-        np.savez_compressed(
-            raw_dir / f"single_p{p}.npz",
-            raw_normal=raw_normal,   # (1+len(a_list), n_trials)
-            raw_t=raw_t,             # (1+len(a_list), n_trials)
-            col_labels=np.array(col_labels, dtype=object),
-            config=json.dumps(config),
-        )
-
-    # save summaries to results/tables
+    # Save summaries to results/tables
     idx = p_list
     pd.DataFrame(mean_normal, index=idx, columns=col_labels).to_csv(tables_dir / "single_normal_mean.csv")
     pd.DataFrame(std_normal,  index=idx, columns=col_labels).to_csv(tables_dir / "single_normal_std.csv")
     pd.DataFrame(mean_t,      index=idx, columns=col_labels).to_csv(tables_dir / "single_t_mean.csv")
     pd.DataFrame(std_t,       index=idx, columns=col_labels).to_csv(tables_dir / "single_t_std.csv")
 
-    print("✅ Single simulation complete. Tables -> results/tables, raw -> results/raw")
+    print("✅ Single simulation complete. Saved in results/tables")
 
 
 # ------------------------------------------------------------
@@ -143,27 +183,71 @@ def run_simulation_multi(
     n: int,
     nu: int,
     n_trials: int,
-    sigma_coef: Tuple[float, float, float] = (2.0, 1.0, 40.0),
+    sigma_coef: Tuple[float, float, float],
     master_seed: int = 725,
 ) -> None:
     """
-    Multi-spike, multi-reference simulation.
-    Saves raw trial arrays (NPZ) to results/raw and summary CSVs (mean/std) to results/tables.
-    """
-    base_dir = Path("results")
-    raw_dir = base_dir / "raw"
-    tables_dir = base_dir / "tables"
-    raw_dir.mkdir(exist_ok=True, parents=True)
-    tables_dir.mkdir(exist_ok=True, parents=True)
+    Run the multi-spike / multi-reference simulation under Normal and t sampling
+    and write summary tables (means and stds of principal angles) to disk.
 
-    config: Dict[str, Any] = {
-        "p_list": p_list,
-        "n": n,
-        "nu": nu,
-        "n_trials": n_trials,
-        "sigma_coef": list(sigma_coef),
-        "master_seed": master_seed,
-    }
+    Parameters
+    ----------
+    p_list : List[int]
+        List of ambient dimensions p to sweep over (e.g., [100, 200, 500, ...]).
+    n : int
+        Sample size per trial.
+    nu : int
+        Degrees of freedom for Student-t sampling (used only for the t runs).
+    n_trials : int
+        Number of Monte Carlo trials per (p, distribution) setting.
+    sigma_coef : Tuple[float, float, float]
+        Covariance coefficients (c1, c2, c3) for the two-spike model:
+        Σ = c1·p·u1u1ᵀ + c2·p·u2u2ᵀ + c3·I_p.
+        The true eigenvectors U_m = [u1, u2] form the true 2-D subspace.
+    master_seed : int, default=725
+        Master seed for reproducibility. A NumPy RNG is initialized with this seed,
+        and per-trial seeds are drawn from it for Normal and t runs.
+
+    Procedure
+    ---------
+    For each p in `p_list`:
+      1) Construct Σ and the true 2-D spike subspace U_m using `sigma_multi_spike`.
+      2) Generate two fixed reference vectors V = [v1, v2] using `generate_reference_vectors`
+         with predefined linear combinations of the orthonormal basis from `generate_basis`.
+      3) Repeat for n_trials:
+         - Sample X ~ N(0, Σ) and X_t ~ t_ν(0, Σ).
+         - Compute the top-2 ARG and PCA subspaces for each dataset.
+         - Record the two principal angles between each estimated subspace
+           and the true subspace U_m.
+      4) Aggregate over trials to compute mean and standard deviation of
+         principal angles for each of the following comparisons:
+             ARG1, PCA1 : first principal angle
+             ARG2, PCA2 : second principal angle
+
+    Outputs (files)
+    ---------------
+    Writes four CSV tables to `results/tables/` (index = p values, columns as below):
+      - multi_normal_mean.csv  : mean principal angles (radians) for Normal runs
+      - multi_normal_std.csv   : std  of principal angles for Normal runs
+      - multi_t_mean.csv       : mean principal angles (radians) for t runs
+      - multi_t_std.csv        : std  of principal angles for t runs
+
+    Columns
+    -------
+    "ARG1" : first principal angle (ARG vs truth)
+    "PCA1" : first principal angle (PCA vs truth)
+    "ARG2" : second principal angle (ARG vs truth)
+    "PCA2" : second principal angle (PCA vs truth)
+
+    Returns
+    -------
+    None
+        Results are saved to disk; nothing is returned.
+    """
+    # --- paths ---
+    base_dir = Path("results")
+    tables_dir = base_dir / "tables"
+    tables_dir.mkdir(exist_ok=True, parents=True)
 
     col_labels = ["ARG1", "PCA1", "ARG2", "PCA2"]
     mean_normal = np.zeros((len(p_list), len(col_labels)))
@@ -213,27 +297,155 @@ def run_simulation_multi(
         std_normal[pi, :]  = angle_normal.std(axis=0, ddof=0)
         std_t[pi, :]       = angle_t.std(axis=0, ddof=0)
 
-        # raw per p
-        np.savez_compressed(
-            raw_dir / f"multi_p{p}.npz",
-            angle_normal=angle_normal,  # (n_trials, 4)
-            angle_t=angle_t,            # (n_trials, 4)
-            col_labels=np.array(col_labels, dtype=object),
-            config=json.dumps(config),
-        )
-
-    # save summaries to results/tables
+    # Save summaries to results/tables
     idx = p_list
     pd.DataFrame(mean_normal, index=idx, columns=col_labels).to_csv(tables_dir / "multi_normal_mean.csv")
     pd.DataFrame(std_normal,  index=idx, columns=col_labels).to_csv(tables_dir / "multi_normal_std.csv")
     pd.DataFrame(mean_t,      index=idx, columns=col_labels).to_csv(tables_dir / "multi_t_mean.csv")
     pd.DataFrame(std_t,       index=idx, columns=col_labels).to_csv(tables_dir / "multi_t_std.csv")
 
-    print("✅ Multi simulation complete. Tables -> results/tables, raw -> results/raw")
+    print("✅ Multi simulation complete. Saved in results/tables")
+
+
+# ------------------------------------------------------------
+# Convergence-rate simulation for Theorem 4
+# ------------------------------------------------------------
+def run_simulation_convergence_rate(
+    p_list: List[int],
+    n: int,
+    n_trials: int,
+    powers: List[float],
+    snr_list: List[float],
+    master_seed: int = 725,
+) -> None:
+    """
+    Estimate convergence-rate curves for the inner product u1ᵀ d1 for varying SNR levels
+    under single-spike, single-reference case, and write normalized summary tables to disk.
+
+    For each SNR in `snr_list`, set Σ = c1·p·e1e1ᵀ + c2·I_p with (c1, c2) = (1, 1/SNR),
+    construct a single reference vector v = (e1 + e2)/√2, compute the (normalized) first
+    negative-ridge discriminant d1 for each dataset, and record
+        M_α(p) = p^α · |u1ᵀ d1|
+    averaged over trials. Each α-curve is then normalized by its value at the
+    **first p in `p_list`**.
+
+    Parameters
+    ----------
+    p_list : List[int]
+        List of dimensions p to sweep over (e.g., [100, 200, 500, ...]).
+        The first element p_list[0] is used as the normalization baseline.
+    n : int
+        Sample size per trial.
+    n_trials : int
+        Number of Monte Carlo trials at each (SNR, p) point.
+    powers : List[float]
+        Exponents α to evaluate in M_α(p). Columns in the output are labeled "alpha={α}".
+    snr_list : List[float]
+        Positive SNR values (SNR > 0). For each SNR, we use (c1, c2) = (1, 1/SNR).
+    master_seed : int, default=725
+        Master seed for reproducibility. A NumPy RNG is initialized with this seed,
+        and per-trial seeds are drawn from it when sampling datasets.
+
+    Procedure
+    ---------
+    For each SNR in `snr_list`:
+      1) For each p in `p_list`:
+         - Build Σ = c1·p·e1e1ᵀ + c2·I_p and set u1 = e1.
+         - Form a single reference vector v = (e1 + e2)/√2 via `generate_reference_vectors`.
+         - Repeat for `n_trials`:
+             · Sample X ~ N(0, Σ) of shape (n, p).
+             · Compute the (normalized) negative-ridge discriminant d1 (spike_number=1).
+             · Compute |u1ᵀ d1| and then p^α·|u1ᵀ d1| for each α in `powers`.
+         - Aggregate across trials to get the mean for each α at this p.
+      2) Normalize each α-curve by its value at p_list[0].
+
+    Outputs (files)
+    ---------------
+    For each SNR value, write one CSV to `results/tables/`:
+      - convergence_rate_snr{SNR}.csv
+        * Index: p values from `p_list`
+        * Columns: "alpha={α}" for α in `powers`
+        * Entries: normalized mean M_α(p) / M_α(p_list[0])
+
+    Returns
+    -------
+    None
+        Results are saved to disk; nothing is returned.
+    """
+    # --- paths ---
+    base_dir = Path("results")
+    tables_dir = base_dir / "tables"
+    tables_dir.mkdir(exist_ok=True, parents=True)
+
+    def _snr_tag(snr: float) -> str:
+        # format like 0.001, 0.025, 0.5, 1 (no scientific notation)
+        return f"{snr:g}"
+
+    # Outer loop over SNR settings
+    for snr in tqdm(snr_list, desc="convergence: SNR sweep", leave=False):
+        if snr <= 0:
+            raise ValueError(f"SNR must be positive; got {snr}")
+        c1 = 1.0
+        c2 = c1 / snr
+
+        mean_mat = np.zeros((len(p_list), len(powers)))
+        std_mat  = np.zeros_like(mean_mat)   # kept in case
+
+        master_rng = np.random.default_rng(master_seed)
+
+        for pi, p in enumerate(tqdm(p_list, desc=f"  p sweep (snr={_snr_tag(snr)})", leave=False)):
+            # Σ = c1 * p * e1 e1^T + c2 I_p, u1 = e1
+            Sigma, u1 = sigma_single_spike(p=p, coef=(c1, c2))
+            if u1.ndim == 1:
+                u1 = u1[:, None]  # (p,1)
+
+            # v1 = (e1 + e2)/sqrt(2)
+            E = generate_basis(p)
+            A = np.array([[1/np.sqrt(2), 1/np.sqrt(2), 0.0, 0.0]])  # (1,4)
+            V = generate_reference_vectors(E, A)                     # (p,1)
+
+            mu = np.zeros(p)
+            vals = np.zeros((n_trials, len(powers)))  # trial × power
+
+            for t in range(n_trials):
+                seed_t = int(master_rng.integers(0, 2**31 - 1))
+                X = sample_normal(Sigma=Sigma, n=n, mu=mu, seed=seed_t)  # (n,p)
+
+                # d1 (normalized)
+                D = compute_negative_ridge_discriminants(
+                    samples=X,
+                    reference_vectors=V,
+                    spike_number=1,
+                    normalize=True,
+                )  # (p,1)
+                d1 = D[:, 0]
+
+                # |u1^T d1|
+                ip = float(np.abs(u1[:, 0].T @ d1))
+
+                # p^α * |u1^T d1|
+                for j, alpha in enumerate(powers):
+                    vals[t, j] = (p ** alpha) * ip
+
+            # Aggregate at fixed p
+            mean_mat[pi, :] = vals.mean(axis=0)
+            std_mat[pi, :]  = vals.std(axis=0, ddof=0)
+
+        # Normalize using the first row (p=100) as baseline
+        baseline = np.where(mean_mat[0, :] == 0.0, 1.0, mean_mat[0, :])
+        mean_norm = mean_mat / baseline[None, :]
+
+        # Save normalized table for this SNR
+        col_labels = [f"alpha={a:g}" for a in powers]
+        idx = p_list
+        out_csv = tables_dir / f"convergence_rate_snr{_snr_tag(snr)}.csv"
+        pd.DataFrame(mean_norm, index=idx, columns=col_labels).to_csv(out_csv)
+
+    print("✅ Convergence-rate simulation complete. Saved in results/tables")
 
 
 # ------------------------------------------------------------------
-# Example direct execution (you can delete or keep for quick runs)
+# Run simulation
 # ------------------------------------------------------------------
 if __name__ == "__main__":
     run_simulation_single(
@@ -252,5 +464,14 @@ if __name__ == "__main__":
         nu=5,
         n_trials=100,
         sigma_coef=(2.0, 1.0, 40.0),
+        master_seed=725,
+    )
+
+    run_simulation_convergence_rate(
+        p_list=[100, 200, 500, 1000, 2000],
+        n=40,
+        n_trials=100,
+        powers=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+        snr_list=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5],
         master_seed=725,
     )

@@ -1,3 +1,11 @@
+# dgps.py
+# - generate_basis(p)
+# - sigma_single_spike(p, coefs)
+# - sigma_multi_spike(p, coefs)
+# - sample_normal(Sigma, n, mu, seed)
+# - sample_t(Sigma, nu, n, mu, seed)
+# - generate_reference_vectors(E, A)
+
 from typing import Optional, Tuple
 import numpy as np
 from numpy.linalg import cholesky
@@ -29,7 +37,7 @@ def generate_basis(p: int) -> np.ndarray:
 
 # -------- Covariance builders --------
 
-def sigma_single_spike(p: int, coef: Tuple[float, float] = (1.0, 40.0)) -> Tuple[np.ndarray, np.ndarray]:
+def sigma_single_spike(p: int, coef: Tuple[float, float]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Sigma = c1 * p * e1 e1^T + c2 * I_p  (single-spike)
     Returns (Sigma, e1), where e1 is the principal spike (length p).
@@ -43,7 +51,7 @@ def sigma_single_spike(p: int, coef: Tuple[float, float] = (1.0, 40.0)) -> Tuple
 
 def sigma_multi_spike(
     p: int,
-    coef: Tuple[float, float, float] = (2.0, 1.0, 40.0)
+    coef: Tuple[float, float, float]
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Sigma = c1 * p * e1 e1^T + c2 * p * e2 e2^T + c3 * I_p  (two spikes)

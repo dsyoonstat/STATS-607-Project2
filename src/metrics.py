@@ -1,18 +1,7 @@
+# metrics.py
+# - compute_principal_angles(U, V)
+
 import numpy as np
-
-def angle_between(u: np.ndarray, v: np.ndarray) -> float:
-    """
-    Principal angle (radians) between two directions u, v in R^p:
-        angle = arccos(|u^T v| / (||u|| ||v||))
-    Robust to tiny norms via clipping.
-    """
-    u = np.asarray(u).reshape(-1)
-    v = np.asarray(v).reshape(-1)
-    un = u / max(np.linalg.norm(u), 1e-32)
-    vn = v / max(np.linalg.norm(v), 1e-32)
-    c = float(np.clip(np.abs(np.dot(un, vn)), 0.0, 1.0))
-    return float(np.arccos(c))
-
 
 def compute_principal_angles(U: np.ndarray, V: np.ndarray) -> np.ndarray:
     """
