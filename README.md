@@ -1,12 +1,14 @@
-# ARG Simulation Study
+# Simulational Studies of the Adaptive Reference-Guided Estimator for Principal Component Subspace under High-Dimensional Low-Sample-Size Data
+
+Umich STATS 607 Unit 2 Project, Fall 2025
 
 This project reproduces and extends simulation results of [**Yoon and Jung (2025)**](https://onlinelibrary.wiley.com/doi/full/10.1002/sta4.70081).
 It implements three simulation modules:
-1. **Single-spike, single-reference** (Normal and $t$ distributions)  
-2. **Multi-spike, multi-reference** (Normal and $t$ distributions)  
-3. **Convergence-rate analysis** for Theorem 4 (Normal distribution only)
+1. **Single-spike, single-reference case** (Reproducing tables 1(normal) and 3($t$))  
+2. **Multi-spike, multi-reference** (Reproducing tables 2(normal) and 4($t$))  
+3. **Convergence-rate analysis** for Theorem 4 (Normal distribution only, not in the original paper)
 
-For details, see the paper and `ADEMP.md`.
+For details, see the paper and `ADEMP.md` (requires MathJax for equation rendering).
 
 All simulations output summary CSV tables under `results/tables/`, and plots summarizing the results are generated under `results/figures/`.
 
@@ -61,7 +63,7 @@ make test         # Run test suite
 
 ## Estimated Runtime
 
-- **Single-spike + Multi-spike + Convergence-rate simulations**:  
+- **Single-spike + Multi-spike + Convergence-rate simulations** (`make simulate`):  
   < 10 minutes total on a high-end laptop (Apple M4 pro).  
 - Plot generation (`make figures`): < 10 seconds.
 
